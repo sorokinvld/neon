@@ -2475,6 +2475,9 @@ class NeonProxy(PgProtocol):
         http_port: int,
         mgmt_port: int,
         auth_backend: NeonProxy.AuthBackend,
+        wss_port: Optional[int] = None,
+        tls_cert_path: Optional[Path] = None,
+        tls_key_path: Optional[Path] = None,
         metric_collection_endpoint: Optional[str] = None,
         metric_collection_interval: Optional[str] = None,
     ):
@@ -2486,6 +2489,9 @@ class NeonProxy(PgProtocol):
         self.neon_binpath = neon_binpath
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
+        self.wss_port = wss_port
+        self.tls_cert_path = tls_cert_path
+        self.tls_key_path = tls_key_path
         self.auth_backend = auth_backend
         self.metric_collection_endpoint = metric_collection_endpoint
         self.metric_collection_interval = metric_collection_interval
@@ -2501,6 +2507,12 @@ class NeonProxy(PgProtocol):
             *self.auth_backend.extra_args(),
         ]
 
+        if self.wss_port is not None:
+            args += [*["--wss", f"{self.host}:{self.wss_port}"]]
+        if self.tls_cert_path is not None:
+            args += [*["--tls-cert", str(self.tls_cert_path)]]
+        if self.tls_key_path is not None:
+            args += [*["--tls-key", str(self.tls_key_path)]]
         if (
             self.metric_collection_endpoint is not None
             and self.metric_collection_interval is not None
@@ -2509,6 +2521,10 @@ class NeonProxy(PgProtocol):
                 *["--metric-collection-endpoint", self.metric_collection_endpoint],
                 *["--metric-collection-interval", self.metric_collection_interval],
             ]
+
+        # If the proxy is configured with TLS, use TLS in the clients
+        if self.tls_cert_path is not None:
+            self.default_options["sslmode"]="require"
 
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
@@ -2620,7 +2636,10 @@ def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterato
 
 @pytest.fixture(scope="function")
 def static_proxy(
-    vanilla_pg: VanillaPostgres, port_distributor: PortDistributor, neon_binpath: Path
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    test_output_dir: Path,
 ) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
 
@@ -2633,15 +2652,27 @@ def static_proxy(
     dbname = vanilla_pg.default_options["dbname"]
     auth_endpoint = f"postgres://proxy:password@{host}:{port}/{dbname}"
 
+    # Create a public/private key pair, for testing TLS-encoded websockets
+    tls_cert_path = test_output_dir / "proxy-test.crt"
+    tls_key_path = test_output_dir / "proxy-test.key"
+    subprocess.run(
+        f"openssl req -new -x509 -days 365 -nodes -out {tls_cert_path} -keyout {tls_key_path} -subj '/CN=*.neon.localtest.me'",
+        shell=True,
+    )
+
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
+    wss_port = port_distributor.get_port()
 
     with NeonProxy(
         neon_binpath=neon_binpath,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
+        wss_port=wss_port,
+        tls_cert_path=tls_cert_path,
+        tls_key_path=tls_key_path,
         auth_backend=NeonProxy.Postgres(auth_endpoint),
     ) as proxy:
         proxy.start()
