@@ -12,6 +12,9 @@ on:
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
     - cron:  '0 3 * * *' # run once a day, timezone is utc
+  push:
+    branches:
+      - bayandin/test
 
   workflow_dispatch: # adds ability to run this manually
     inputs:
@@ -34,76 +37,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  bench:
-    env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "300"
-      TEST_PG_BENCH_SCALES_MATRIX: "10,100"
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
-      TEST_OUTPUT: /tmp/test_output
-      BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
-      PLATFORM: "neon-staging"
-
-    runs-on: [ self-hosted, us-east-2, x64 ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Download Neon artifact
-      uses: ./.github/actions/download
-      with:
-        name: neon-${{ runner.os }}-release-artifact
-        path: /tmp/neon/
-        prefix: latest
-
-    - name: Create Neon Project
-      id: create-neon-project
-      uses: ./.github/actions/neon-project-create
-      with:
-        region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
-        postgres_version: ${{ env.DEFAULT_PG_VERSION }}
-        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-
-    - name: Run benchmark
-      uses: ./.github/actions/run-python-test-set
-      with:
-        build_type: ${{ env.BUILD_TYPE }}
-        test_selection: performance
-        run_in_parallel: false
-        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        # Set --sparse-ordering option of pytest-order plugin
-        # to ensure tests are running in order of appears in the file.
-        # It's important for test_perf_pgbench.py::test_pgbench_remote_* tests
-        extra_params: -m remote_cluster --sparse-ordering --timeout 5400 --ignore test_runner/performance/test_perf_olap.py
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
-        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-
-    - name: Delete Neon Project
-      if: ${{ always() }}
-      uses: ./.github/actions/neon-project-delete
-      with:
-        project_id: ${{ steps.create-neon-project.outputs.project_id }}
-        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-
-    - name: Create Allure report
-      if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report-generate
-
-    - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
-      uses: slackapi/slack-github-action@v1
-      with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
   generate-matrices:
     # Create matrices for the benchmarking jobs, so we run benchmarks on rds only once a week (on Saturday)
     #
@@ -116,45 +49,15 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
-      olap-compare-matrix: ${{ steps.olap-compare-matrix.outputs.matrix }}
 
     steps:
     - name: Generate matrix for pgbench benchmark
       id: pgbench-compare-matrix
       run: |
         matrix='{
-          "platform": [
-            "neon-captest-new",
-            "neon-captest-reuse",
-            "neonvm-captest-new"
-          ],
-          "db_size": [ "10gb" ],
-          "include": [{ "platform": "neon-captest-freetier",   "db_size": "3gb"  },
-                      { "platform": "neon-captest-new",        "db_size": "50gb" },
-                      { "platform": "neonvm-captest-freetier", "db_size": "3gb"  },
-                      { "platform": "neonvm-captest-new",      "db_size": "50gb" }]
+          "platform": [ "neon-captest-new" ],
+          "db_size": [ "3gb" ]
         }'
-
-        if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
-                                                   { "platform": "rds-aurora",   "db_size": "50gb"}]')
-        fi
-
-        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
-
-    - name: Generate matrix for OLAP benchmarks
-      id: olap-compare-matrix
-      run: |
-        matrix='{
-          "platform": [
-            "neon-captest-reuse"
-          ]
-        }'
-
-        if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres" },
-                                                   { "platform": "rds-aurora"   }]')
-        fi
 
         echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
@@ -235,6 +138,17 @@ jobs:
 
         psql ${CONNSTR} -c "SELECT version();"
 
+    - name: test
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_PROD }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+      run: |
+        curl -LO https://dl.k8s.io/release/v1.27.3/bin/linux/amd64/kubectl
+        echo "fba6c062e754a120bc8105cde1344de200452fe014a8759e06e4eec7ed258a09  kubectl" | sha256sum --check
+
+        aws eks list-clusters
+        # aws eks update-kubeconfig --region us-east-2
+
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
       with:
@@ -243,32 +157,6 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_init
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-
-    - name: Benchmark simple-update
-      uses: ./.github/actions/run-python-test-set
-      with:
-        build_type: ${{ env.BUILD_TYPE }}
-        test_selection: performance
-        run_in_parallel: false
-        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-
-    - name: Benchmark select-only
-      uses: ./.github/actions/run-python-test-set
-      with:
-        build_type: ${{ env.BUILD_TYPE }}
-        test_selection: performance
-        run_in_parallel: false
-        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -284,280 +172,3 @@ jobs:
     - name: Create Allure report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
-
-    - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
-      uses: slackapi/slack-github-action@v1
-      with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
-  clickbench-compare:
-    # ClichBench DB for rds-aurora and rds-Postgres deployed to the same clusters
-    # we use for performance testing in pgbench-compare.
-    # Run this job only when pgbench-compare is finished to avoid the intersection.
-    # We might change it after https://github.com/neondatabase/neon/issues/2900.
-    #
-    # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
-    # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
-    if: ${{ !cancelled() }}
-    needs: [ generate-matrices, pgbench-compare ]
-
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
-
-    env:
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
-      TEST_OUTPUT: /tmp/test_output
-      BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
-      PLATFORM: ${{ matrix.platform }}
-
-    runs-on: [ self-hosted, us-east-2, x64 ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Download Neon artifact
-      uses: ./.github/actions/download
-      with:
-        name: neon-${{ runner.os }}-release-artifact
-        path: /tmp/neon/
-        prefix: latest
-
-    - name: Add Postgres binaries to PATH
-      run: |
-        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
-        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
-
-    - name: Set up Connection String
-      id: set-up-connstr
-      run: |
-        case "${PLATFORM}" in
-          neon-captest-reuse)
-            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_10M_CONNSTR }}
-            ;;
-          rds-aurora)
-            CONNSTR=${{ secrets.BENCHMARK_RDS_AURORA_CLICKBENCH_10M_CONNSTR }}
-            ;;
-          rds-postgres)
-            CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CLICKBENCH_10M_CONNSTR }}
-            ;;
-          *)
-            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
-            exit 1
-            ;;
-        esac
-
-        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
-
-        psql ${CONNSTR} -c "SELECT version();"
-
-    - name: ClickBench benchmark
-      uses: ./.github/actions/run-python-test-set
-      with:
-        build_type: ${{ env.BUILD_TYPE }}
-        test_selection: performance/test_perf_olap.py
-        run_in_parallel: false
-        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_clickbench
-      env:
-        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-
-    - name: Create Allure report
-      if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report-generate
-
-    - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
-      uses: slackapi/slack-github-action@v1
-      with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic OLAP perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
-  tpch-compare:
-    # TCP-H DB for rds-aurora and rds-Postgres deployed to the same clusters
-    # we use for performance testing in pgbench-compare & clickbench-compare.
-    # Run this job only when clickbench-compare is finished to avoid the intersection.
-    # We might change it after https://github.com/neondatabase/neon/issues/2900.
-    #
-    # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
-    if: ${{ !cancelled() }}
-    needs: [ generate-matrices, clickbench-compare ]
-
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
-
-    env:
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
-      TEST_OUTPUT: /tmp/test_output
-      BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
-      PLATFORM: ${{ matrix.platform }}
-
-    runs-on: [ self-hosted, us-east-2, x64 ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Download Neon artifact
-      uses: ./.github/actions/download
-      with:
-        name: neon-${{ runner.os }}-release-artifact
-        path: /tmp/neon/
-        prefix: latest
-
-    - name: Add Postgres binaries to PATH
-      run: |
-        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
-        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
-
-    - name: Set up Connection String
-      id: set-up-connstr
-      run: |
-        case "${PLATFORM}" in
-          neon-captest-reuse)
-            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_TPCH_S10_CONNSTR }}
-            ;;
-          rds-aurora)
-            CONNSTR=${{ secrets.BENCHMARK_RDS_AURORA_TPCH_S10_CONNSTR }}
-            ;;
-          rds-postgres)
-            CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_TPCH_S10_CONNSTR }}
-            ;;
-          *)
-            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
-            exit 1
-            ;;
-        esac
-
-        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
-
-        psql ${CONNSTR} -c "SELECT version();"
-
-    - name: Run TPC-H benchmark
-      uses: ./.github/actions/run-python-test-set
-      with:
-        build_type: ${{ env.BUILD_TYPE }}
-        test_selection: performance/test_perf_olap.py
-        run_in_parallel: false
-        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_tpch
-      env:
-        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-
-    - name: Create Allure report
-      if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report-generate
-
-    - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
-      uses: slackapi/slack-github-action@v1
-      with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic TPC-H perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
-  user-examples-compare:
-    if: ${{ !cancelled() }}
-    needs: [ generate-matrices, tpch-compare ]
-
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
-
-    env:
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
-      TEST_OUTPUT: /tmp/test_output
-      BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
-      PLATFORM: ${{ matrix.platform }}
-
-    runs-on: [ self-hosted, us-east-2, x64 ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Download Neon artifact
-      uses: ./.github/actions/download
-      with:
-        name: neon-${{ runner.os }}-release-artifact
-        path: /tmp/neon/
-        prefix: latest
-
-    - name: Add Postgres binaries to PATH
-      run: |
-        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
-        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
-
-    - name: Set up Connection String
-      id: set-up-connstr
-      run: |
-        case "${PLATFORM}" in
-          neon-captest-reuse)
-            CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_CAPTEST_CONNSTR }}
-            ;;
-          rds-aurora)
-            CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_RDS_AURORA_CONNSTR }}
-            ;;
-          rds-postgres)
-            CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_RDS_POSTGRES_CONNSTR }}
-            ;;
-          *)
-            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
-            exit 1
-            ;;
-        esac
-
-        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
-
-        psql ${CONNSTR} -c "SELECT version();"
-
-    - name: Run user examples
-      uses: ./.github/actions/run-python-test-set
-      with:
-        build_type: ${{ env.BUILD_TYPE }}
-        test_selection: performance/test_perf_olap.py
-        run_in_parallel: false
-        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_user_examples
-      env:
-        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-
-    - name: Create Allure report
-      if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report-generate
-
-    - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
-      uses: slackapi/slack-github-action@v1
-      with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic User example perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
