@@ -2,12 +2,12 @@
 //!
 //! Handles both SQL over HTTP and SQL over Websockets.
 
-pub use reqwest_middleware::{ClientWithMiddleware, Error};
-pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+mod conn_pool;
+mod sql_over_http;
+mod websocket;
 
-use crate::http::conn_pool::GlobalConnPool;
+use std::{convert::Infallible, future::ready, sync::Arc};
 
-use crate::{cancellation::CancelMap, config::ProxyConfig};
 use futures::StreamExt;
 use hyper::{
     server::{
@@ -17,15 +17,14 @@ use hyper::{
     Body, Method, Request, Response,
 };
 use serde_json::{json, Value};
-
-use std::{convert::Infallible, future::ready, sync::Arc};
 use tls_listener::TlsListener;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
 
-use super::websocket::serve_websocket;
+use crate::{cancellation::CancelMap, config::ProxyConfig};
+use conn_pool::GlobalConnPool;
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -113,7 +112,8 @@ async fn request_handler(
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
         tokio::spawn(async move {
-            if let Err(e) = serve_websocket(websocket, config, &cancel_map, session_id, host).await
+            if let Err(e) =
+                websocket::serve_websocket(websocket, config, &cancel_map, session_id, host).await
             {
                 error!("error in websocket connection: {e:?}");
             }
@@ -122,7 +122,7 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let result = super::sql_over_http::handle(request, sni_hostname, conn_pool)
+        let result = sql_over_http::handle(request, sni_hostname, conn_pool)
             .instrument(info_span!("sql-over-http"))
             .await;
         let status_code = match result {

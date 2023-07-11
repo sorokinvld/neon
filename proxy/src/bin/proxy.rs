@@ -6,6 +6,7 @@ use proxy::metrics;
 use anyhow::bail;
 use clap::{self, Arg};
 use proxy::config::{self, ProxyConfig};
+use proxy::serverless;
 use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -56,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         info!("Starting wss on {serverless_address}");
         let serverless_listener = TcpListener::bind(serverless_address).await?;
 
-        client_tasks.push(tokio::spawn(http::serverless::task_main(
+        client_tasks.push(tokio::spawn(serverless::task_main(
             config,
             serverless_listener,
             cancellation_token.clone(),
@@ -65,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut tasks = vec![
         tokio::spawn(proxy::handle_signals(cancellation_token)),
-        tokio::spawn(http::server::task_main(http_listener)),
+        tokio::spawn(http::health_server::task_main(http_listener)),
         tokio::spawn(console::mgmt::task_main(mgmt_listener)),
     ];
 
