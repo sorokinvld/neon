@@ -12,6 +12,7 @@ bstr.workspace = true
 bytes = { workspace = true, features = ["serde"] }
 chrono.workspace = true
 clap.workspace = true
+dashmap.workspace = true
 consumption_metrics.workspace = true
 futures.workspace = true
 git-version.workspace = true

@@ -3038,6 +3038,7 @@ dependencies = [
  "chrono",
  "clap",
  "consumption_metrics",
+ "dashmap",
  "futures",
  "git-version",
  "hashbrown 0.13.2",

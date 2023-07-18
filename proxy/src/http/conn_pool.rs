@@ -1,8 +1,10 @@
 use anyhow::Context;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use parking_lot::Mutex;
 use pq_proto::StartupMessageParams;
 use std::fmt;
+use std::sync::atomic::{self, AtomicUsize};
 use std::{collections::HashMap, sync::Arc};
 use tokio::time;
 
@@ -58,7 +60,9 @@ pub struct GlobalConnPool {
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    global_pool: Mutex<HashMap<String, Arc<Mutex<EndpointConnPool>>>>,
+    global_pool: DashMap<String, Arc<Mutex<EndpointConnPool>>>,
+
+    global_pool_size: AtomicUsize,
 
     // Maximum number of connections per one endpoint.
     // Can mix different (dbname, username) connections.
@@ -72,7 +76,8 @@ pub struct GlobalConnPool {
 impl GlobalConnPool {
     pub fn new(config: &'static crate::config::ProxyConfig) -> Arc<Self> {
         Arc::new(Self {
-            global_pool: Mutex::new(HashMap::new()),
+            global_pool: DashMap::new(),
+            global_pool_size: AtomicUsize::new(0),
             max_conns_per_endpoint: MAX_CONNS_PER_ENDPOINT,
             proxy_config: config,
         })
@@ -139,10 +144,10 @@ impl GlobalConnPool {
                     _last_access: std::time::Instant::now(),
                 });
 
-                total_conns += 1;
                 returned = true;
                 per_db_size = pool_entries.len();
 
+                total_conns += 1;
                 pool.total_conns += 1;
             }
         }
@@ -160,8 +165,8 @@ impl GlobalConnPool {
     async fn get_endpoint_pool(&self, endpoint: &String) -> Arc<Mutex<EndpointConnPool>> {
         // find or create a pool for this endpoint
         let mut created = false;
-        let mut global_pool = self.global_pool.lock();
-        let pool = global_pool
+        let pool = self
+            .global_pool
             .entry(endpoint.clone())
             .or_insert_with(|| {
                 created = true;
@@ -171,11 +176,13 @@ impl GlobalConnPool {
                 }))
             })
             .clone();
-        let global_pool_size = global_pool.len();
-        drop(global_pool);
 
         // log new global pool size
         if created {
+            let global_pool_size = self
+                .global_pool_size
+                .fetch_add(1, atomic::Ordering::Relaxed)
+                + 1;
             info!(
                 "pool: created new pool for '{endpoint}', global pool size now {global_pool_size}"
             );
