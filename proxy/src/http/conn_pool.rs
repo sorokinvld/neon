@@ -165,20 +165,26 @@ impl GlobalConnPool {
         Ok(())
     }
 
+    /// find or create a pool for this endpoint.
     async fn get_endpoint_pool(&self, endpoint: &String) -> Arc<Mutex<EndpointConnPool>> {
-        // find or create a pool for this endpoint
         let mut created = false;
-        let pool = self
-            .global_pool
-            .entry(endpoint.clone())
-            .or_insert_with(|| {
-                created = true;
-                Arc::new(Mutex::new(EndpointConnPool {
-                    pools: HashMap::new(),
-                    total_conns: 0,
-                }))
-            })
-            .clone();
+        // try a read only lock first.
+        let pool = match self.global_pool.get(endpoint) {
+            Some(pool) => pool.clone(),
+            None => {
+                // fall back to more expensive write lock
+                self.global_pool
+                    .entry(endpoint.clone())
+                    .or_insert_with(|| {
+                        created = true;
+                        Arc::new(Mutex::new(EndpointConnPool {
+                            pools: HashMap::new(),
+                            total_conns: 0,
+                        }))
+                    })
+                    .clone()
+            }
+        };
 
         // log new global pool size
         if created {
