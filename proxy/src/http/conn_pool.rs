@@ -62,6 +62,9 @@ pub struct GlobalConnPool {
     // pool as early as possible and release the lock.
     global_pool: DashMap<String, Arc<Mutex<EndpointConnPool>>>,
 
+    /// [`DashMap::len`] iterates over all inner pools and acquires a read lock on each.
+    /// That seems like far too much effort, so we're using a relaxed increment counter instead.
+    /// It's only used for diagnostics.
     global_pool_size: AtomicUsize,
 
     // Maximum number of connections per one endpoint.
