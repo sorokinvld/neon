@@ -4,16 +4,22 @@
   remote_user: "developer"
     
   tasks:
-    - name: Download file
+    - name: Save JSON file to a remote disk
       get_url:
         url: "http://{{ inventory_hostname }}:7676/v1/debug_dump?dump_all=true&dump_disk_content=false"
         dest: "/tmp/{{ inventory_hostname }}-dev.json"
 
-    - name: Cat file to a varibale
-      shell: "cat /tmp/{{ inventory_hostname }}-dev.json"
-      register: cat_result
-
     - local_action: 
-        module: copy 
-        content: "{{ cat_result.stdout }}"
-        dest: "./result/{{ inventory_hostname }}.json"
+        module: shell
+        cmd: |
+          set -e
+          tsh ssh "developer@{{ inventory_hostname }}" "while true; do sleep 30; done" &
+          # save PID to kill process after work
+          pid=$!
+          # sleep to wait until ssh session is open
+          sleep 5
+          # download file
+          tsh scp "developer@{{ inventory_hostname }}:/tmp/{{ inventory_hostname }}-dev.json" "./result/{{ inventory_hostname }}.json"
+          # kill background process
+          kill -9 "${pid}"
+          echo killed "${pid}"
