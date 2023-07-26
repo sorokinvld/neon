@@ -230,7 +230,7 @@ where
     ///
     /// Read the value for given key. Returns the value, or None if it doesn't exist.
     ///
-    pub fn get(&self, search_key: &[u8; L]) -> Result<Option<u64>> {
+    pub async fn get(&self, search_key: &[u8; L]) -> Result<Option<u64>> {
         let mut result: Option<u64> = None;
         self.visit(search_key, VisitDirection::Forwards, |key, value| {
             if key == search_key {
