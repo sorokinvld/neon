@@ -237,7 +237,8 @@ where
                 result = Some(value);
             }
             false
-        })?;
+        })
+        .await?;
         Ok(result)
     }
 
@@ -246,7 +247,7 @@ where
     /// will be called for every key >= 'search_key' (or <= 'search_key', if scanning
     /// backwards)
     ///
-    pub fn visit<V>(
+    pub async fn visit<V>(
         &self,
         search_key: &[u8; L],
         dir: VisitDirection,
