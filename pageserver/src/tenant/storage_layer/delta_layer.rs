@@ -610,23 +610,14 @@ impl DeltaLayer {
             &self.layer_name(),
         )
     }
-
-    /// Obtains all keys and value references stored in the layer
+    /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub async fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
-        let inner = self
-            .load(LayerAccessKind::KeyIter, ctx)
-            .context("load delta layer")?;
-        DeltaLayerInner::load_val_refs(inner).context("Layer index is corrupted")
-    }
-
-    /// Loads all keys stored in the layer. Returns key, lsn and value size.
-    pub async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
+    pub async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64, ValueRef)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .context("load delta layer keys")?;
-        inner.load_keys().context("Layer index is corrupted")
+        DeltaLayerInner::load_keys(inner).context("Layer index is corrupted")
     }
 }
 
@@ -899,7 +890,7 @@ impl Drop for DeltaLayerWriter {
 }
 
 impl DeltaLayerInner {
-    fn load_val_refs(this: &Arc<DeltaLayerInner>) -> Result<Vec<(Key, Lsn, ValueRef)>> {
+    fn load_keys(this: &Arc<DeltaLayerInner>) -> Result<Vec<(Key, Lsn, u64, ValueRef)>> {
         let file = &this.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             this.index_start_blk,
@@ -907,7 +898,7 @@ impl DeltaLayerInner {
             file,
         );
 
-        let mut all_offsets = Vec::<(Key, Lsn, ValueRef)>::new();
+        let mut all_keys: Vec<(Key, Lsn, u64, ValueRef)> = Vec::new();
         tree_reader.visit(
             &[0u8; DELTA_KEY_SIZE],
             VisitDirection::Forwards,
@@ -917,27 +908,6 @@ impl DeltaLayerInner {
                     blob_ref: BlobRef(value),
                     reader: BlockCursor::new(Adapter(this.clone())),
                 };
-                all_offsets.push((delta_key.key(), delta_key.lsn(), val_ref));
-                true
-            },
-        )?;
-
-        Ok(all_offsets)
-    }
-    fn load_keys(&self) -> Result<Vec<(Key, Lsn, u64)>> {
-        let file = &self.file;
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            self.index_start_blk,
-            self.index_root_blk,
-            file,
-        );
-
-        let mut all_keys: Vec<(Key, Lsn, u64)> = Vec::new();
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |key, value| {
-                let delta_key = DeltaKey::from_slice(key);
                 let pos = BlobRef(value).pos();
                 if let Some(last) = all_keys.last_mut() {
                     if last.0 == delta_key.key() {
@@ -949,7 +919,7 @@ impl DeltaLayerInner {
                         last.2 = pos - first_pos;
                     }
                 }
-                all_keys.push((delta_key.key(), delta_key.lsn(), pos));
+                all_keys.push((delta_key.key(), delta_key.lsn(), pos, val_ref));
                 true
             },
         )?;
